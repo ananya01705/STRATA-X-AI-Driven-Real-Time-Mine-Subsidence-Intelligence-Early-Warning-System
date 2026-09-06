@@ -1,0 +1,17 @@
+# Python virtual environment
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# NumPy generated arrays
+*.npy
+
+# Python generated/test data
+synthetic_creep_data.csv
+rock_creep_dataset.csv
+
+# OS/editor files
+.DS_Store
+.vscode/
