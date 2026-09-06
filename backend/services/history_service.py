@@ -2,7 +2,7 @@ from collections import deque
 from typing import Dict, List, Optional, Any
 import pandas as pd
 from datetime import datetime
-from backend.core.config import WINDOW_SIZE
+from backend.core.config import WINDOW_SIZE, REAL_SENSOR_NODE_ID
 from backend.core.conversions import transform_reading_to_ml_format
 
 
@@ -31,8 +31,11 @@ class HistoryService:
         # Convert raw reading to ML format features
         ml_features = transform_reading_to_ml_format(reading, prev_reading)
         
+        is_real = reading.get("is_real", node_id == REAL_SENSOR_NODE_ID)
+
         record = {
             "node_id": node_id,
+            "is_real": is_real,
             "timestamp": reading.get("timestamp", datetime.utcnow().isoformat()),
             "tilt_x": reading.get("tilt_x", 0.0),
             "tilt_y": reading.get("tilt_y", 0.0),
@@ -53,10 +56,16 @@ class HistoryService:
         buffer_len = len(self._node_buffers[node_id])
         return {
             "node_id": node_id,
+            "is_real": is_real,
             "readings_count": buffer_len,
             "required_readings": self.window_size,
             "buffer_status": "READY" if buffer_len >= self.window_size else f"BUFFERING ({buffer_len}/{self.window_size})"
         }
+
+    def add_reading(self, node_id: str, reading: Dict[str, Any]) -> Dict[str, Any]:
+        """Alias for append_reading supporting node_id parameter."""
+        reading["node_id"] = node_id
+        return self.append_reading(reading)
 
     def get_node_history_df(self, node_id: str) -> Optional[pd.DataFrame]:
         """Returns the recent history for a node as a pandas DataFrame."""

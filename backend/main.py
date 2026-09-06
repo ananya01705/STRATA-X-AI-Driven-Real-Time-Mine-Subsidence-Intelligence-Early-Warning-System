@@ -2,34 +2,50 @@ import asyncio
 import json
 import logging
 from datetime import datetime
+from typing import List
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List
+
+from backend.core.config import settings, SENSOR_COMM_TIMEOUT_SECONDS
+from backend.core.exceptions import (
+    StrataException,
+    strata_exception_handler,
+    generic_exception_handler,
+)
 
 from backend.api.telemetry import router as telemetry_router
 from backend.api.prediction import router as prediction_router
 from backend.api.nodes import router as nodes_router
 from backend.api.alerts import router as alerts_router
 from backend.api.simulation import router as simulation_router
+from backend.api.hardware import router as hardware_router
+from backend.api.spatial import router as spatial_router
 
 from backend.services.history_service import history_service
 from backend.services.prediction_service import prediction_service
 from backend.core.risk_engine import risk_engine
+from backend.core.spatial_risk import spatial_risk_engine
 from backend.models.schemas import SystemStatus, RiskState
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO if not settings.DEBUG else logging.DEBUG)
 logger = logging.getLogger("MineSubsidenceBackend")
 
 app = FastAPI(
-    title="SIH 26025 — Mine Subsidence Monitoring & Prediction API",
-    description="Real-Time Underground Coal Mine Strata Subsidence, Time-to-Failure Prediction & Risk Early Warning System",
-    version="1.0.0"
+    title=settings.APP_NAME,
+    description="STRATA-X — AI-Driven Real-Time Mine Subsidence Intelligence, Time-to-Failure Prediction & Spatial Risk Early Warning System",
+    version=settings.APP_VERSION,
+    docs_url="/docs",
+    redoc_url="/redoc"
 )
 
-# Enable CORS for frontend integration
+# Custom Exception Handlers
+app.add_exception_handler(StrataException, strata_exception_handler)
+app.add_exception_handler(Exception, generic_exception_handler)
+
+# Enable CORS for dashboard integration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -41,6 +57,8 @@ app.include_router(prediction_router)
 app.include_router(nodes_router)
 app.include_router(alerts_router)
 app.include_router(simulation_router)
+app.include_router(hardware_router)
+app.include_router(spatial_router)
 
 
 # ==========================================
@@ -75,7 +93,8 @@ ws_manager = ConnectionManager()
 @app.websocket("/ws/telemetry")
 async def websocket_telemetry_stream(websocket: WebSocket):
     """
-    WebSocket endpoint streaming live 1Hz telemetry and risk assessments directly to dashboards.
+    WebSocket endpoint streaming live 1Hz telemetry, node risk assessments,
+    and Layer 2 spatial zone detections directly to dashboards.
     """
     await ws_manager.connect(websocket)
     try:
@@ -85,18 +104,26 @@ async def websocket_telemetry_stream(websocket: WebSocket):
                 node_id = latest["node_id"]
                 pred = prediction_service.predict_node_ttf(node_id)
                 risk = risk_engine.assess_node_risk(node_id, pred)
+                
+                # Check Layer 2 Spatial Status
+                spatial_map = spatial_risk_engine.analyze_spatial_risk()
+                
                 payload = {
                     "type": "TELEMETRY_UPDATE",
                     "timestamp": datetime.utcnow().isoformat(),
                     "node_id": node_id,
-                    "tilt_deg": latest.get("tilt_deg", 1.0),
-                    "ttf_hours": pred.get("ttf_hours", 8.5),
-                    "velocity_mm_h": pred.get("velocity_mm_h", 0.04),
-                    "deformation_mm": pred.get("deformation_mm", 5.0),
+                    "is_real": latest.get("is_real", node_id == "NODE_05"),
+                    "tilt_deg": latest.get("tilt_deg", 0.0),
+                    "ttf_hours": pred.get("ttf_hours"),
+                    "velocity_mm_h": pred.get("velocity_mm_h"),
+                    "deformation_mm": pred.get("deformation_mm"),
                     "risk_state": risk.risk_state.value,
                     "risk_score": risk.risk_score,
                     "trend": risk.trend.value,
-                    "confidence": risk.confidence
+                    "confidence": risk.confidence,
+                    "buffer_status": pred.get("buffer_progress", "READY"),
+                    "active_zones_count": spatial_map.active_zone_count,
+                    "mine_risk": spatial_map.mine_risk.value,
                 }
                 await websocket.send_text(json.dumps(payload))
             await asyncio.sleep(1.0)
@@ -114,18 +141,23 @@ async def websocket_telemetry_stream(websocket: WebSocket):
 @app.get("/", tags=["System"])
 def root():
     return {
-        "project": "SIH26025 - Mine Subsidence Monitoring & Prediction",
+        "project": "STRATA-X — AI-Driven Mine Subsidence Intelligence",
         "system": "Operational",
-        "version": "1.0.0",
+        "version": settings.APP_VERSION,
+        "real_sensor_anchor": "NODE_05",
+        "simulated_nodes": ["NODE_01", "NODE_02", "NODE_03", "NODE_04", "NODE_06", "NODE_07", "NODE_08", "NODE_09"],
         "endpoints": {
             "telemetry": "/telemetry",
             "latest": "/latest",
             "prediction": "/prediction/{node_id}",
             "risk": "/risk",
-            "risk_map": "/risk/map",
+            "spatial_nodes": "/spatial/nodes",
+            "spatial_zones": "/spatial/zones",
+            "spatial_risk_map": "/spatial/risk-map",
             "nodes": "/nodes",
             "alerts": "/alerts",
             "events": "/events",
+            "hardware": "/hardware/serial/status",
             "simulation": "/simulation/scenario",
             "websocket": "/ws/telemetry",
             "docs": "/docs"
@@ -138,7 +170,9 @@ def health():
     return {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
-        "mode": "OFFLINE_LOCAL_EDGE"
+        "mode": "OFFLINE_LOCAL_EDGE",
+        "ml_engine": "READY" if prediction_service.is_ml_loaded else "FALLBACK_PHYSICS",
+        "spatial_engine": "ACTIVE"
     }
 
 
@@ -148,15 +182,41 @@ def get_system_status():
     from backend.storage.database import db
     active_alerts = db.get_active_alerts()
     crit_count = sum(1 for a in active_alerts if a.get("level") == "CRITICAL")
+    warn_count = sum(1 for a in active_alerts if a.get("level") in ("WARNING", "HIGH"))
+
+    # Determine genuinely online nodes based on last_seen timeout
+    now = datetime.utcnow()
+    online_count = 0
+    for nid, r in latest_readings.items():
+        ts = r.get("timestamp")
+        if ts:
+            try:
+                ts_dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).replace(tzinfo=None)
+                if (now - ts_dt).total_seconds() <= SENSOR_COMM_TIMEOUT_SECONDS:
+                    online_count += 1
+            except Exception:
+                online_count += 1
+        else:
+            online_count += 1
+
+    # Ingest into Layer 2 Spatial Engine
+    spatial_map = spatial_risk_engine.analyze_spatial_risk(latest_readings=latest_readings)
 
     return SystemStatus(
-        system="Mine Subsidence Monitoring System",
+        system="STRATA-X Underground Mine Subsidence Intelligence System",
         status="operational",
+        system_online=True,
         mode="OFFLINE_LOCAL_EDGE",
-        timestamp=datetime.utcnow(),
-        active_nodes_count=9,
-        online_nodes_count=len(latest_readings) if latest_readings else 9,
-        critical_alerts_count=crit_count,
-        overall_mine_risk=RiskState.NORMAL if crit_count == 0 else RiskState.CRITICAL,
-        ml_model_loaded=prediction_service.is_ml_loaded
+        timestamp=now,
+        total_nodes=len(settings.DEFAULT_MINE_NODES),
+        active_nodes=len(latest_readings),
+        online_nodes=online_count if online_count > 0 else len(latest_readings),
+        critical_nodes=crit_count,
+        warning_nodes=warn_count,
+        active_zones_count=spatial_map.active_zone_count,
+        overall_mine_risk=spatial_map.mine_risk,
+        ml_model_status="READY" if prediction_service.is_ml_loaded else "FALLBACK_PHYSICS",
+        database_status="CONNECTED",
+        real_sensor_node=settings.REAL_SENSOR_NODE_ID,
+        last_sync=now
     )

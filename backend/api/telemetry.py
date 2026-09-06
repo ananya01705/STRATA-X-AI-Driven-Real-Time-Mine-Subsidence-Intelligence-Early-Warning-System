@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Query
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 
@@ -8,6 +8,7 @@ from backend.services.prediction_service import prediction_service
 from backend.core.risk_engine import risk_engine
 from backend.services.alert_service import alert_service
 from backend.storage.database import db
+from backend.core.config import REAL_SENSOR_NODE_ID
 
 router = APIRouter(tags=["Telemetry"])
 
@@ -21,7 +22,6 @@ def receive_telemetry(reading: SensorReading):
     """
     data = reading.model_dump() if hasattr(reading, "model_dump") else reading.dict()
 
-    
     # 1. Record raw reading in local SQLite DB
     db.record_telemetry(data)
 
@@ -33,7 +33,8 @@ def receive_telemetry(reading: SensorReading):
         pred = prediction_service.predict_node_ttf(reading.node_id)
         if pred.get("status") == "READY":
             risk = risk_engine.assess_node_risk(reading.node_id, pred)
-            db.record_prediction(pred, risk.dict())
+            risk_dict = risk.model_dump() if hasattr(risk, "model_dump") else risk.dict()
+            db.record_prediction(pred, risk_dict)
             alert_service.process_node_assessment(risk)
 
     return TelemetryResponse(
@@ -42,7 +43,8 @@ def receive_telemetry(reading: SensorReading):
         timestamp=reading.timestamp,
         buffer_status=buffer_info["buffer_status"],
         readings_count=buffer_info["readings_count"],
-        required_readings=buffer_info["required_readings"]
+        required_readings=buffer_info["required_readings"],
+        is_real=buffer_info.get("is_real", reading.node_id == REAL_SENSOR_NODE_ID)
     )
 
 
@@ -50,7 +52,6 @@ def receive_telemetry(reading: SensorReading):
 def get_latest_telemetry():
     """
     Returns the most recent system telemetry and risk state.
-    Fully compatible with Member 3's frontend dashboard contract.
     """
     latest = history_service.get_latest_reading()
     
@@ -58,13 +59,14 @@ def get_latest_telemetry():
         # Initial cold start default
         return {
             "timestamp": datetime.utcnow().isoformat(),
-            "node_id": "NODE_01",
-            "tilt_deg": 1.25,
-            "ttf_hours": 8.50,
-            "velocity_mm_h": 0.045,
-            "deformation_mm": 6.20,
+            "node_id": "NODE_05",
+            "is_real": True,
+            "tilt_deg": 1.15,
+            "ttf_hours": None,
+            "velocity_mm_h": 0.038,
+            "deformation_mm": 2.10,
             "risk_status": "NORMAL",
-            "risk_score": 14.5,
+            "risk_score": 10.0,
             "confidence": 0.95,
             "buffer_status": "INITIALIZING"
         }
@@ -76,10 +78,11 @@ def get_latest_telemetry():
     return {
         "timestamp": latest.get("timestamp", datetime.utcnow().isoformat()),
         "node_id": node_id,
+        "is_real": latest.get("is_real", node_id == REAL_SENSOR_NODE_ID),
         "tilt_deg": round(float(latest.get("tilt_deg", 1.0)), 2),
-        "ttf_hours": pred.get("ttf_hours", 8.5),
+        "ttf_hours": pred.get("ttf_hours"),
         "velocity_mm_h": pred.get("velocity_mm_h", 0.04),
-        "deformation_mm": pred.get("deformation_mm", 5.0),
+        "deformation_mm": pred.get("deformation_mm", 2.0),
         "risk_status": risk.risk_state.value,
         "risk_score": risk.risk_score,
         "confidence": risk.confidence,
@@ -90,7 +93,7 @@ def get_latest_telemetry():
 
 @router.get("/telemetry/history")
 def get_telemetry_history(
-    node_id: str = Query("NODE_01", description="Node identifier"),
+    node_id: str = Query("NODE_05", description="Node identifier"),
     limit: int = Query(50, description="Max historical points")
 ):
     """Returns historical raw telemetry points for chart plotting."""

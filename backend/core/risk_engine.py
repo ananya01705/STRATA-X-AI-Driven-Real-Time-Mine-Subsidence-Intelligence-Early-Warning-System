@@ -6,7 +6,8 @@ from backend.core.config import (
     TTF_CRITICAL_HOURS,
     TTF_HIGH_RISK_HOURS,
     TTF_WATCH_HOURS,
-    VELOCITY_THRESHOLD_HIGH
+    VELOCITY_THRESHOLD_HIGH,
+    REAL_SENSOR_NODE_ID,
 )
 from backend.models.schemas import RiskState, TrendState, RiskAssessment
 from backend.core.health import health_engine
@@ -32,6 +33,7 @@ class MultiFactorRiskEngine:
         ttf = prediction_result.get("ttf_hours")
         velocity = prediction_result.get("velocity_mm_h", 0.0) or 0.0
         deformation = prediction_result.get("deformation_mm", 0.0) or 0.0
+        is_real = (node_id == REAL_SENSOR_NODE_ID)
 
         # 1. Evaluate temporal trend & acceleration from node history
         trend = TrendState.STABLE
@@ -123,7 +125,8 @@ class MultiFactorRiskEngine:
             trend=trend,
             confidence=confidence,
             reasons=reasons,
-            anomaly=anomaly_report
+            anomaly=anomaly_report,
+            is_real=is_real,
         )
 
 

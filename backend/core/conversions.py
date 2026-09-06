@@ -23,7 +23,6 @@ def transform_reading_to_ml_format(
     - inverse_velocity (1 / velocity with zero-protection)
     """
     # 1. Total cumulative deformation
-    # If hardware provides direct displacement_mm, use it; otherwise compute from resultant tilt
     displacement = float(current_reading.get("displacement_mm", 0.0))
     tilt_mag = compute_resultant_tilt(
         float(current_reading.get("tilt_x", 0.0)),
@@ -39,9 +38,9 @@ def transform_reading_to_ml_format(
             curr_time = current_reading.get("timestamp")
             prev_time = previous_reading.get("timestamp")
             if isinstance(curr_time, str):
-                curr_time = datetime.fromisoformat(curr_time)
+                curr_time = datetime.fromisoformat(curr_time.replace("Z", "+00:00")).replace(tzinfo=None)
             if isinstance(prev_time, str):
-                prev_time = datetime.fromisoformat(prev_time)
+                prev_time = datetime.fromisoformat(prev_time.replace("Z", "+00:00")).replace(tzinfo=None)
             dt_seconds = max((curr_time - prev_time).total_seconds(), 0.1)
             dt_hours = dt_seconds / 3600.0
         except Exception:
@@ -57,7 +56,7 @@ def transform_reading_to_ml_format(
     # Ensure non-negative & non-zero velocity
     velocity = max(velocity, 0.001)
 
-    # 3. Inverse velocity
+    # 3. Inverse velocity with zero protection
     inverse_velocity = 1.0 / velocity
 
     return {
@@ -65,4 +64,17 @@ def transform_reading_to_ml_format(
         "velocity": velocity,
         "inverse_velocity": inverse_velocity,
         "tilt_deg": tilt_mag,
+    }
+
+
+def compute_kinematics(node_id: str, reading: Dict[str, Any]) -> Dict[str, Any]:
+    """Helper for hardware ingestion to transform raw sensor packet with kinematic features."""
+    ml_format = transform_reading_to_ml_format(reading)
+    return {
+        **reading,
+        "node_id": node_id,
+        "tilt_deg": ml_format["tilt_deg"],
+        "deformation": ml_format["deformation"],
+        "velocity": ml_format["velocity"],
+        "inverse_velocity": ml_format["inverse_velocity"],
     }

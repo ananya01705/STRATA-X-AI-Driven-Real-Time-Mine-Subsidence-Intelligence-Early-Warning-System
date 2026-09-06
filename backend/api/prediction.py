@@ -1,12 +1,14 @@
-from fastapi import APIRouter, HTTPException, Path
+from fastapi import APIRouter, Path
 from datetime import datetime
 from typing import Dict, Any, List
 
 from backend.services.prediction_service import prediction_service
 from backend.services.history_service import history_service
 from backend.core.risk_engine import risk_engine
-from backend.core.config import DEFAULT_MINE_NODES
-from backend.models.schemas import RiskAssessment, RiskState
+from backend.core.spatial_risk import spatial_risk_engine
+from backend.core.config import DEFAULT_MINE_NODES, REAL_SENSOR_NODE_ID
+from backend.core.exceptions import NodeNotFoundException
+from backend.models.schemas import RiskState
 
 router = APIRouter(tags=["Prediction & Risk"])
 
@@ -14,15 +16,16 @@ router = APIRouter(tags=["Prediction & Risk"])
 @router.get("/prediction/{node_id}")
 def get_node_prediction(node_id: str = Path(..., description="Sensor Node ID")):
     """Returns Time-to-Failure (TTF) prediction and kinematics for a specific node."""
-    pred = prediction_service.predict_node_ttf(node_id)
-    return pred
+    if node_id not in DEFAULT_MINE_NODES:
+        raise NodeNotFoundException(node_id)
+    return prediction_service.predict_node_ttf(node_id)
 
 
 @router.get("/risk")
 def get_overall_mine_risk():
     """
     Returns the comprehensive mine-wide risk assessment,
-    aggregating individual node risks and spatial correlation.
+    aggregating individual node risks and Layer 2 spatial correlation.
     """
     latest_readings = history_service.get_all_latest_readings()
     
@@ -37,6 +40,7 @@ def get_overall_mine_risk():
         
         node_assessments.append({
             "node_id": nid,
+            "is_real": (nid == REAL_SENSOR_NODE_ID),
             "risk_score": assessment.risk_score,
             "risk_state": assessment.risk_state.value,
             "ttf_hours": assessment.ttf_hours,
@@ -55,22 +59,17 @@ def get_overall_mine_risk():
             if min_ttf is None or assessment.ttf_hours < min_ttf:
                 min_ttf = assessment.ttf_hours
 
-    if max_risk_score >= 80.0 or len(critical_nodes) > 0:
-        overall_state = RiskState.CRITICAL
-    elif max_risk_score >= 55.0:
-        overall_state = RiskState.HIGH_RISK
-    elif max_risk_score >= 35.0:
-        overall_state = RiskState.WATCH
-    else:
-        overall_state = RiskState.NORMAL
+    # Layer 2 spatial risk synthesis
+    spatial_map = spatial_risk_engine.analyze_spatial_risk(latest_readings=latest_readings)
 
     return {
         "timestamp": datetime.utcnow().isoformat(),
         "overall_risk_score": max_risk_score,
-        "overall_risk_state": overall_state.value,
-        "lowest_ttf_hours": min_ttf or 8.5,
+        "overall_risk_state": spatial_map.mine_risk.value,
+        "lowest_ttf_hours": min_ttf,
         "critical_nodes_count": len(critical_nodes),
         "critical_nodes": critical_nodes,
+        "active_zones_count": spatial_map.active_zone_count,
         "node_assessments": node_assessments
     }
 
@@ -94,10 +93,11 @@ def get_spatial_risk_map():
             "lat": info["lat"],
             "lon": info["lon"],
             "depth_m": info["depth_m"],
+            "is_real": info.get("is_real", nid == REAL_SENSOR_NODE_ID),
             "tilt_deg": reading.get("tilt_deg", 1.0),
             "deformation_mm": pred.get("deformation_mm", 0.0),
             "velocity_mm_h": pred.get("velocity_mm_h", 0.04),
-            "ttf_hours": pred.get("ttf_hours", 8.5),
+            "ttf_hours": pred.get("ttf_hours"),
             "risk_score": risk.risk_score,
             "risk_state": risk.risk_state.value,
             "is_anomaly": risk.anomaly.is_anomaly if risk.anomaly else False

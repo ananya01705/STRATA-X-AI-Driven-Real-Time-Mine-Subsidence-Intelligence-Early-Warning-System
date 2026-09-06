@@ -4,7 +4,7 @@ from typing import Dict, Any, Optional
 from datetime import datetime
 
 from backend.services.history_service import history_service
-from backend.core.config import ML_MODEL_PATH
+from backend.core.config import ML_MODEL_PATH, REAL_SENSOR_NODE_ID
 
 logger = logging.getLogger(__name__)
 
@@ -33,15 +33,20 @@ class PredictionService:
         """
         Executes TTF inference for a specific node if 30 readings are available.
         """
+        is_real = (node_id == REAL_SENSOR_NODE_ID)
         count = history_service.get_node_buffer_count(node_id)
         if count < 30:
             return {
                 "node_id": node_id,
+                "is_real": is_real,
                 "timestamp": datetime.utcnow().isoformat(),
                 "status": "BUFFERING",
                 "buffer_progress": f"{count}/30",
                 "readings_count": count,
                 "ttf_hours": None,
+                "velocity_mm_h": None,
+                "deformation_mm": None,
+                "inverse_velocity": None,
                 "message": f"Waiting for 30 consecutive readings. Currently buffered {count}/30."
             }
 
@@ -49,11 +54,15 @@ class PredictionService:
         if df is None or len(df) < 30:
             return {
                 "node_id": node_id,
+                "is_real": is_real,
                 "timestamp": datetime.utcnow().isoformat(),
                 "status": "ERROR",
                 "buffer_progress": f"{count}/30",
                 "readings_count": count,
                 "ttf_hours": None,
+                "velocity_mm_h": None,
+                "deformation_mm": None,
+                "inverse_velocity": None,
                 "message": "Failed to extract dataframe from history."
             }
 
@@ -66,6 +75,7 @@ class PredictionService:
                 ttf_hours = max(float(raw_ttf), 0.1)
                 return {
                     "node_id": node_id,
+                    "is_real": is_real,
                     "timestamp": datetime.utcnow().isoformat(),
                     "status": "READY",
                     "buffer_progress": "30/30",
@@ -94,6 +104,7 @@ class PredictionService:
 
         return {
             "node_id": node_id,
+            "is_real": is_real,
             "timestamp": datetime.utcnow().isoformat(),
             "status": "READY",
             "buffer_progress": "30/30",
